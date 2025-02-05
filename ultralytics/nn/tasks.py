@@ -64,6 +64,7 @@ from ultralytics.nn.modules import (
     TorchVision,
     WorldDetect,
     v10Detect,
+    ConcatHead
 )
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
@@ -254,11 +255,12 @@ class BaseModel(nn.Module):
             (BaseModel): An updated BaseModel object.
         """
         self = super()._apply(fn)
-        m = self.model[-1]  # Detect()
-        if isinstance(m, Detect):  # includes all Detect subclasses like Segment, Pose, OBB, WorldDetect
-            m.stride = fn(m.stride)
-            m.anchors = fn(m.anchors)
-            m.strides = fn(m.strides)
+        # Get all detect modules
+        for m in self.model:
+            if isinstance(m, Detect):  # includes all Detect subclasses like Segment, Pose, OBB, WorldDetect
+                m.stride = fn(m.stride)
+                m.anchors = fn(m.anchors)
+                m.strides = fn(m.strides)
         return self
 
     def load(self, weights, verbose=True):
@@ -320,23 +322,24 @@ class DetectionModel(BaseModel):
         self.end2end = getattr(self.model[-1], "end2end", False)
 
         # Build strides
-        m = self.model[-1]  # Detect()
-        if isinstance(m, Detect):  # includes all Detect subclasses like Segment, Pose, OBB, WorldDetect
-            s = 256  # 2x min stride
-            m.inplace = self.inplace
+        # Get all Detect modules
+        # last_m = len(self.model) - 1
+        for i, m in enumerate(self.model):
+            if isinstance(m, Detect):  # includes all Detect subclasses like Segment, Pose, OBB, WorldDetect
+                s = 256  # 2x min stride
+                m.inplace = self.inplace
 
-            def _forward(x):
-                """Performs a forward pass through the model, handling different Detect subclass types accordingly."""
-                if self.end2end:
-                    return self.forward(x)["one2many"]
-                return self.forward(x)[0] if isinstance(m, (Segment, Pose, OBB)) else self.forward(x)
+                def _forward(x):
+                    """Performs a forward pass through the model, handling different Detect subclass types accordingly."""
+                    if self.end2end:
+                        return self.forward(x)["one2many"]
+                    return self.forward(x)[0] if isinstance(m, (Segment, Pose, OBB)) else self.forward(x)
 
-            m.stride = torch.tensor([s / x.shape[-2] for x in _forward(torch.zeros(1, ch, s, s))])  # forward
-            self.stride = m.stride
-            m.bias_init()  # only run once
-        else:
-            self.stride = torch.Tensor([32])  # default stride for i.e. RTDETR
-
+                m.stride = torch.tensor([s / x.shape[-2] for x in _forward(torch.zeros(1, ch, s, s))])  # forward
+                self.stride = m.stride
+                m.bias_init()  # only run once
+            else:
+                self.stride = torch.Tensor([32])  # default stride for i.e. RTDETR
         # Init weights, biases
         initialize_weights(self)
         if verbose:
@@ -1048,7 +1051,8 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             args = [ch[f]]
         elif m is Concat:
             c2 = sum(ch[x] for x in f)
-        elif m in {Detect, WorldDetect, Segment, Pose, OBB, ImagePoolingAttn, v10Detect}:
+        elif m in (ConcatHead, Detect, WorldDetect, Segment, Pose, OBB, ImagePoolingAttn, v10Detect):
+        # elif m in {Detect, WorldDetect, Segment, Pose, OBB, ImagePoolingAttn, v10Detect}:
             args.append([ch[x] for x in f])
             if m is Segment:
                 args[2] = make_divisible(min(args[2], max_channels) * width, 8)
